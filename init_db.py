@@ -2,11 +2,11 @@ import pymysql
 import re
 
 DB_CONFIG = {
-    "host": "118.190.78.149",
+    "host": "localhost",
     "port": 3306,
-    "user": "bili_hot",
-    "password": "rWW3WZTLYDM5886M",
-    "database": "bili_hot",
+    "user": "root",
+    "password": "root123456",
+    "database": "mydb",
     "charset": "utf8mb4",
 }
 

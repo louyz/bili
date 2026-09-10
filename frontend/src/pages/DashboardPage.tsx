@@ -1,10 +1,9 @@
 import { useEffect, useState } from "react";
 import { Row, Col, Card, Statistic, Spin } from "antd";
 import { PlayCircleOutlined, VideoCameraOutlined, TeamOutlined, RiseOutlined } from "@ant-design/icons";
-import * as echarts from "echarts";
 import "echarts-wordcloud";
 import ReactECharts from "echarts-for-react";
-import { analysisApi, videoApi, type DashboardStats, type TrendPoint, type PartitionStat, type TagFrequency } from "../api";
+import { analysisApi, type DashboardStats, type TrendPoint, type PartitionStat, type TagFrequency } from "../api";
 
 export default function DashboardPage() {
   const [stats, setStats] = useState<DashboardStats | null>(null);

@@ -19,6 +19,7 @@ class Video(Base):
     share_count = Column(Integer, nullable=False, default=0)
     duration = Column(Integer, nullable=False, default=0)
     pub_time = Column(DateTime, nullable=False)
+    pub_location = Column(String(50), nullable=True)
     partition_main = Column(String(50), nullable=False, default="未知")
     partition_sub = Column(String(50), nullable=True)
     up_id = Column(BigInteger, nullable=False)

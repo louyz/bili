@@ -1,15 +1,14 @@
 import pymysql
-from passlib.context import CryptContext
+import bcrypt
 
-pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
-new_hash = pwd.hash("admin123")
+new_hash = bcrypt.hashpw("admin123".encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 conn = pymysql.connect(
-    host="118.190.78.149",
+    host="localhost",
     port=3306,
-    user="bili_hot",
-    password="rWW3WZTLYDM5886M",
-    database="bili_hot",
+    user="root",
+    password="root123456",
+    database="mydb",
     charset="utf8mb4",
 )
 cursor = conn.cursor()

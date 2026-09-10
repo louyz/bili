@@ -1,4 +1,4 @@
-import axios from "axios";
+import axios, { type AxiosRequestConfig } from "axios";
 
 const api = axios.create({
   baseURL: "/api",
@@ -85,6 +85,8 @@ export interface UpUserInfo {
   level: number;
   sign: string;
   avatar_url: string;
+  official_role: number;
+  official_title: string;
   follower_count: number;
   following_count: number;
   total_likes: number;
@@ -123,6 +125,19 @@ export interface TrendPoint {
   date: string;
   avg_play_count: number;
   video_count: number;
+}
+
+export interface UpContribution {
+  up_uid: number;
+  up_nickname: string;
+  avatar_url: string | null;
+  level: number;
+  video_count: number;
+  audio_count: number;
+  image_text_count: number;
+  elec: number;
+  follower_count: number;
+  total_contribution: number;
 }
 
 export interface UserInfo {
@@ -170,7 +185,7 @@ export const videoApi = {
     partition?: string;
     keyword?: string;
   }) => api.get<ListResponse<VideoItem>>("/videos/ranking", { params }),
-  getDetail: (bvid: string) => api.get<VideoDetail>(`/videos/detail/${bvid}`),
+  getDetail: (bvid: string, config?: AxiosRequestConfig) => api.get<VideoDetail>(`/videos/detail/${bvid}`, config),
   getPartitions: () => api.get<{ name: string; count: number }[]>("/videos/partitions"),
 };
 
@@ -183,10 +198,12 @@ export const analysisApi = {
   getTags: (limit: number = 50) =>
     api.get<TagFrequency[]>("/analysis/tags", { params: { limit } }),
   getUpRank: (limit: number = 20) =>
-    api.get<{ up_uid: number; video_count: number; avg_play_count: number; avg_heat_score: number }[]>(
+    api.get<{ up_uid: number; up_nickname: string; video_count: number; avg_play_count: number; avg_heat_score: number }[]>(
       "/analysis/up-rank",
       { params: { limit } }
     ),
+  getUpContribution: (limit: number = 20) =>
+    api.get<UpContribution[]>("/analysis/up-contribution", { params: { limit } }),
 };
 
 // Favorites
@@ -207,10 +224,17 @@ export const favApi = {
 export const adminApi = {
   getUsers: (params: { page?: number; page_size?: number }) =>
     api.get("/admin/users", { params }),
+  createUser: (data: { username: string; email: string; password: string; nickname?: string; role?: string }) =>
+    api.post("/admin/users", data),
+  updateUser: (id: number, data: { email?: string; nickname?: string; role?: string; is_active?: boolean }) =>
+    api.put(`/admin/users/${id}`, data),
+  resetUserPassword: (id: number, new_password: string) =>
+    api.put(`/admin/users/${id}/reset-password`, { new_password }),
   toggleUserActive: (id: number) =>
     api.put(`/admin/users/${id}/toggle-active`),
-  triggerCrawl: (taskType: string = "popular") =>
+  triggerCrawl: (taskType: string = "full_sync") =>
     api.post("/admin/crawl/trigger", null, { params: { task_type: taskType } }),
+  stopCrawl: () => api.post("/admin/crawl/stop"),
   getCrawlStatus: () => api.get("/admin/crawl/status"),
   getCrawlLogs: (params: { page?: number; page_size?: number }) =>
     api.get("/admin/crawl/logs", { params }),

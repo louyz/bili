@@ -1,4 +1,3 @@
-from sqlalchemy import Column, BigInteger, String, Enum, DateTime, Boolean, func
 from app.database import engine
 from sqlalchemy.orm import declarative_base
 

@@ -1,12 +1,11 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select, func, desc, text
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Optional
 from datetime import datetime, timedelta
 from app.database import get_db
 from app.models.video import Video
 from app.models.video_tag import VideoTag
-from app.models.snapshot import VideoSnapshot
+from app.models.up_user import UpUser
 from app.schemas.video import DashboardStats, TrendDataPoint, PartitionStat, TagFrequencyItem
 
 router = APIRouter(prefix="/api/analysis", tags=["数据分析"])
@@ -54,13 +53,13 @@ async def get_trends(
     start_date = datetime.now().date() - timedelta(days=days)
     result = await db.execute(
         select(
-            VideoSnapshot.snapshot_date,
-            func.avg(VideoSnapshot.play_count).label("avg_play"),
-            func.count(VideoSnapshot.id).label("cnt"),
+            func.date(Video.crawl_time).label("snapshot_date"),
+            func.avg(Video.play_count).label("avg_play"),
+            func.count(Video.id).label("cnt"),
         )
-        .where(VideoSnapshot.snapshot_date >= start_date)
-        .group_by(VideoSnapshot.snapshot_date)
-        .order_by(VideoSnapshot.snapshot_date)
+        .where(Video.is_active == True, func.date(Video.crawl_time) >= start_date)
+        .group_by(func.date(Video.crawl_time))
+        .order_by(func.date(Video.crawl_time))
     )
     rows = result.all()
     return [
@@ -141,12 +140,14 @@ async def get_up_rank(
     result = await db.execute(
         select(
             Video.up_uid,
+            UpUser.nickname,
             func.count(Video.id).label("video_count"),
             func.avg(Video.play_count).label("avg_play"),
             func.avg(Video.heat_score).label("avg_heat"),
         )
+        .outerjoin(UpUser, Video.up_uid == UpUser.up_uid)
         .where(Video.is_active == True)
-        .group_by(Video.up_uid)
+        .group_by(Video.up_uid, UpUser.nickname)
         .order_by(desc(text("avg_heat")))
         .limit(limit)
     )
@@ -154,9 +155,55 @@ async def get_up_rank(
     return [
         {
             "up_uid": row[0],
-            "video_count": row[1],
-            "avg_play_count": round(float(row[2] or 0), 0),
-            "avg_heat_score": round(float(row[3] or 0), 2),
+            "up_nickname": row[1] or "未知",
+            "video_count": row[2],
+            "avg_play_count": round(float(row[3] or 0), 0),
+            "avg_heat_score": round(float(row[4] or 0), 2),
+        }
+        for row in rows
+    ]
+
+
+@router.get("/up-contribution")
+async def get_up_contribution(
+    limit: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    contribution = (
+        func.coalesce(UpUser.video_count, 0)
+        + func.coalesce(UpUser.audio_count, 0)
+        + func.coalesce(UpUser.image_text_count, 0)
+    ).label("contribution")
+
+    result = await db.execute(
+        select(
+            UpUser.up_uid,
+            UpUser.nickname,
+            UpUser.avatar_url,
+            UpUser.level,
+            UpUser.video_count,
+            UpUser.audio_count,
+            UpUser.image_text_count,
+            UpUser.elec,
+            UpUser.follower_count,
+            contribution,
+        )
+        .order_by(desc(contribution))
+        .limit(limit)
+    )
+    rows = result.all()
+    return [
+        {
+            "up_uid": row[0],
+            "up_nickname": row[1] or "未知",
+            "avatar_url": row[2],
+            "level": row[3] or 0,
+            "video_count": row[4] or 0,
+            "audio_count": row[5] or 0,
+            "image_text_count": row[6] or 0,
+            "elec": row[7] or 0,
+            "follower_count": row[8] or 0,
+            "total_contribution": row[9] or 0,
         }
         for row in rows
     ]

@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select, func, desc, text
+from sqlalchemy import select, func, desc
+from collections import defaultdict
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 from app.database import get_db
@@ -20,32 +21,40 @@ async def get_video_ranking(
     keyword: Optional[str] = Query(None, description="标题搜索关键词"),
     db: AsyncSession = Depends(get_db),
 ):
-    base_query = select(Video).where(Video.is_active == True)
+    count_base = select(func.count(Video.id)).where(Video.is_active == True)
+    if partition and partition != "全部":
+        count_base = count_base.where(Video.partition_main == partition)
+    if keyword:
+        count_base = count_base.where(Video.title.contains(keyword))
+    total_result = await db.execute(count_base)
+    total = total_result.scalar() or 0
 
+    base_query = (
+        select(Video, UpUser)
+        .outerjoin(UpUser, Video.up_id == UpUser.id)
+        .where(Video.is_active == True)
+    )
     if partition and partition != "全部":
         base_query = base_query.where(Video.partition_main == partition)
     if keyword:
         base_query = base_query.where(Video.title.contains(keyword))
 
-    count_query = select(func.count()).select_from(base_query.subquery())
-    total_result = await db.execute(count_query)
-    total = total_result.scalar() or 0
-
     sort_col = getattr(Video, sort_by, Video.heat_score)
     query = base_query.order_by(desc(sort_col)).offset((page - 1) * page_size).limit(page_size)
     result = await db.execute(query)
-    videos = result.scalars().all()
+    rows = result.all()
+
+    bvids = [v.bvid for v, _ in rows]
+    tag_map: dict = defaultdict(list)
+    if bvids:
+        tag_result = await db.execute(
+            select(VideoTag.bvid, VideoTag.tag_name).where(VideoTag.bvid.in_(bvids))
+        )
+        for bvid, tag_name in tag_result.all():
+            tag_map[bvid].append(tag_name)
 
     items = []
-    for v in videos:
-        up_result = await db.execute(select(UpUser).where(UpUser.id == v.up_id))
-        up = up_result.scalar_one_or_none()
-
-        tag_result = await db.execute(
-            select(VideoTag.tag_name).where(VideoTag.bvid == v.bvid)
-        )
-        tags = [row[0] for row in tag_result.all()]
-
+    for v, up in rows:
         items.append(VideoListItem(
             id=v.id,
             bvid=v.bvid,
@@ -66,7 +75,7 @@ async def get_video_ranking(
             heat_score=v.heat_score,
             up_nickname=up.nickname if up else None,
             up_follower_count=up.follower_count if up else None,
-            tags=tags if tags else None,
+            tags=tag_map.get(v.bvid) or None,
             crawl_time=v.crawl_time,
         ))
 

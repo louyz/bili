@@ -9,11 +9,11 @@
 -- ------------------------------------------------------------
 -- 1. 创建数据库
 -- ------------------------------------------------------------
-CREATE DATABASE IF NOT EXISTS bili_hot
+CREATE DATABASE IF NOT EXISTS mydb
     DEFAULT CHARACTER SET utf8mb4
     COLLATE utf8mb4_unicode_ci;
 
-USE bili_hot;
+USE mydb;
 
 -- ============================================================
 -- 2. 核心业务表设计
@@ -64,6 +64,8 @@ CREATE TABLE `up_users` (
     `level`           TINYINT UNSIGNED DEFAULT 0                COMMENT 'UP主等级，范围 Lv0-Lv6',
     `sign`            VARCHAR(500)     DEFAULT NULL             COMMENT 'UP主个人签名/简介',
     `avatar_url`      VARCHAR(500)     DEFAULT NULL             COMMENT 'UP主头像URL',
+    `official_role`   TINYINT UNSIGNED NOT NULL DEFAULT 0       COMMENT '认证类型: 0=无,1=个人,2=机构,3=媒体,4=政府,5=电视,6=明星,7=虚拟主播',
+    `official_title`  VARCHAR(200)     DEFAULT NULL             COMMENT '认证称号',
     `follower_count`  BIGINT UNSIGNED  NOT NULL DEFAULT 0       COMMENT '粉丝数',
     `following_count` BIGINT UNSIGNED  NOT NULL DEFAULT 0       COMMENT '关注数',
     `total_likes`     BIGINT UNSIGNED  NOT NULL DEFAULT 0       COMMENT '总获赞数',
@@ -405,96 +407,3 @@ FROM video_tags vt
 INNER JOIN videos v ON vt.bvid = v.bvid AND v.is_active = 1
 GROUP BY v.partition_main, vt.tag_name
 ORDER BY v.partition_main, video_count DESC;
-
--- 4.3 今日热门视频TOP50视图 (含标签)
--- CREATE OR REPLACE VIEW v_today_hot_top50 AS
--- SELECT
---     v.bvid,
---     v.title,
---     v.play_count,
---     v.danmaku_count,
---     v.comment_count,
---     v.like_count,
---     v.coin_count,
---     v.favorite_count,
---     v.share_count,
---     v.interaction_rate,
---     v.heat_score,
---     v.partition_main,
---     v.duration,
---     v.pub_time,
---     u.nickname AS up_nickname,
---     u.level AS up_level,
---     u.follower_count AS up_follower_count,
---     GROUP_CONCAT(vt.tag_name SEPARATOR ',') AS tags
--- FROM videos v
--- LEFT JOIN up_users u ON v.up_id = u.id
--- LEFT JOIN video_tags vt ON v.bvid = vt.bvid
--- WHERE v.is_active = 1
---   AND DATE(v.crawl_time) = CURDATE()
--- GROUP BY v.id
--- ORDER BY v.heat_score DESC
--- LIMIT 50;
-
--- ============================================================
--- 5. 外键约束 (可选，根据项目需要启用)
--- ============================================================
--- 说明: 在高并发写入场景下，外键约束可能影响性能。
---       建议在应用层保证数据一致性，生产环境可按需启用。
-
--- ALTER TABLE `videos`
---     ADD CONSTRAINT `fk_videos_up_id` FOREIGN KEY (`up_id`) REFERENCES `up_users`(`id`) ON DELETE CASCADE ON UPDATE CASCADE;
-
--- ALTER TABLE `video_tags`
---     ADD CONSTRAINT `fk_video_tags_bvid` FOREIGN KEY (`bvid`) REFERENCES `videos`(`bvid`) ON DELETE CASCADE ON UPDATE CASCADE;
-
--- ALTER TABLE `video_snapshots`
---     ADD CONSTRAINT `fk_snapshots_video_id` FOREIGN KEY (`video_id`) REFERENCES `videos`(`id`) ON DELETE CASCADE ON UPDATE CASCADE,
---     ADD CONSTRAINT `fk_snapshots_up_id` FOREIGN KEY (`up_id`) REFERENCES `up_users`(`id`) ON DELETE CASCADE ON UPDATE CASCADE;
-
--- ALTER TABLE `up_user_snapshots`
---     ADD CONSTRAINT `fk_up_snapshots_up_id` FOREIGN KEY (`up_id`) REFERENCES `up_users`(`id`) ON DELETE CASCADE ON UPDATE CASCADE;
-
--- ALTER TABLE `favorite_folders`
---     ADD CONSTRAINT `fk_folders_user_id` FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE ON UPDATE CASCADE;
-
--- ALTER TABLE `favorites`
---     ADD CONSTRAINT `fk_favorites_user_id` FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE ON UPDATE CASCADE,
---     ADD CONSTRAINT `fk_favorites_video_id` FOREIGN KEY (`video_id`) REFERENCES `videos`(`id`) ON DELETE CASCADE ON UPDATE CASCADE,
---     ADD CONSTRAINT `fk_favorites_folder_id` FOREIGN KEY (`folder_id`) REFERENCES `favorite_folders`(`id`) ON DELETE SET NULL ON UPDATE CASCADE;
-
--- ALTER TABLE `crawl_log_details`
---     ADD CONSTRAINT `fk_crawl_details_log_id` FOREIGN KEY (`log_id`) REFERENCES `crawl_logs`(`id`) ON DELETE CASCADE ON UPDATE CASCADE;
-
--- ============================================================
--- 6. 数据归档存储过程 (可选)
--- ============================================================
--- 说明: 用于定期将超过保留天数的历史快照数据归档到归档表
-
--- DELIMITER //
--- CREATE PROCEDURE archive_old_snapshots(IN retention_days INT)
--- BEGIN
---     DECLARE archive_date DATE;
---     SET archive_date = DATE_SUB(CURDATE(), INTERVAL retention_days DAY);
---
---     -- 归档视频快照
---     INSERT INTO video_snapshots_archive
---     SELECT * FROM video_snapshots
---     WHERE snapshot_date < archive_date;
---
---     DELETE FROM video_snapshots
---     WHERE snapshot_date < archive_date;
---
---     -- 归档UP主快照
---     INSERT INTO up_user_snapshots_archive
---     SELECT * FROM up_user_snapshots
---     WHERE snapshot_date < archive_date;
---
---     DELETE FROM up_user_snapshots
---     WHERE snapshot_date < archive_date;
--- END //
--- DELIMITER ;
-
--- ============================================================
--- 文档结束
--- ============================================================

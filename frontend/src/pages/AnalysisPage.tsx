@@ -1,27 +1,27 @@
 import { useEffect, useState } from "react";
 import { Card, Row, Col, Select, Spin, Table } from "antd";
 import ReactECharts from "echarts-for-react";
-import { analysisApi, type TrendPoint, type PartitionStat, type TagFrequency } from "../api";
+import { analysisApi, type TrendPoint, type TagFrequency, type UpContribution } from "../api";
 
 export default function AnalysisPage() {
   const [trends, setTrends] = useState<TrendPoint[]>([]);
-  const [partitions, setPartitions] = useState<PartitionStat[]>([]);
   const [tags, setTags] = useState<TagFrequency[]>([]);
   const [upRank, setUpRank] = useState<any[]>([]);
+  const [upContributions, setUpContributions] = useState<UpContribution[]>([]);
   const [trendDays, setTrendDays] = useState(7);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     Promise.all([
       analysisApi.getTrends(trendDays),
-      analysisApi.getPartitions(),
       analysisApi.getTags(50),
       analysisApi.getUpRank(20),
-    ]).then(([t, p, tag, up]) => {
+      analysisApi.getUpContribution(20),
+    ]).then(([t, tag, up, contrib]) => {
       setTrends(t.data);
-      setPartitions(p.data);
       setTags(tag.data);
       setUpRank(up.data);
+      setUpContributions(contrib.data);
     }).finally(() => setLoading(false));
   }, [trendDays]);
 
@@ -54,43 +54,158 @@ export default function AnalysisPage() {
     ],
   };
 
-  const partitionOption = {
-    tooltip: { trigger: "item" as const },
+  const tagDistData = (() => {
+    const top = tags.slice(0, 10);
+    const rest = tags.slice(10);
+    const restTotal = rest.reduce((sum, t) => sum + t.video_count, 0);
+    const data = top.map((t) => ({ name: t.tag_name, value: t.video_count }));
+    if (restTotal > 0) data.push({ name: "其他", value: restTotal });
+    return data;
+  })();
+
+  const tagDistOption = {
+    tooltip: {
+      trigger: "item" as const,
+      formatter: "{b}: {c} ({d}%)",
+    },
+    legend: {
+      type: "scroll" as const,
+      orient: "vertical" as const,
+      right: 10,
+      top: 20,
+      bottom: 20,
+      data: tagDistData.map((d) => d.name),
+    },
     series: [
       {
         type: "pie",
-        radius: "65%",
-        data: partitions.map((p) => ({ name: p.partition, value: p.count })),
+        radius: ["35%", "65%"],
+        center: ["40%", "50%"],
+        data: tagDistData,
         emphasis: { itemStyle: { shadowBlur: 10, shadowOffsetX: 0, shadowColor: "rgba(0,0,0,0.5)" } },
+        label: { formatter: "{b}: {d}%" },
       },
     ],
   };
 
-  const tagOption = {
-    tooltip: { trigger: "item" as const },
-    xAxis: { type: "category" as const, data: tags.slice(0, 20).map((t) => t.tag_name), axisLabel: { rotate: 45 } },
-    yAxis: { type: "value" as const },
+  const tagPlaySorted = [...tags].sort((a, b) => b.avg_play_count - a.avg_play_count).slice(0, 20);
+
+  const tagPlayOption = {
+    tooltip: {
+      trigger: "axis" as const,
+      axisPointer: { type: "cross" as const },
+      formatter: (params: any) => {
+        const idx = params[0].dataIndex;
+        const item = tagPlaySorted[idx];
+        return `${item.tag_name}<br/>视频数: ${item.video_count}<br/>平均播放: ${item.avg_play_count.toLocaleString()}<br/>热度: ${item.avg_heat_score.toLocaleString()}`;
+      },
+    },
+    legend: { data: ["视频数", "平均播放量"] },
+    grid: { left: "3%", right: "4%", bottom: "10%", containLabel: true },
+    xAxis: {
+      type: "category" as const,
+      data: tagPlaySorted.map((t) => t.tag_name),
+      axisLabel: { rotate: 45, interval: 0 },
+    },
+    yAxis: [
+      { type: "value" as const, name: "视频数", position: "left" },
+      { type: "value" as const, name: "平均播放量", position: "right", axisLabel: { formatter: (v: number) => (v >= 10000 ? v / 10000 + "万" : String(v)) } },
+    ],
     series: [
       {
+        name: "视频数",
         type: "bar",
-        data: tags.slice(0, 20).map((t) => ({ value: t.video_count, name: t.tag_name })),
-        itemStyle: {
-          color: {
-            type: "linear",
-            x: 0, y: 0, x2: 0, y2: 1,
-            colorStops: [
-              { offset: 0, color: "#00A1D6" },
-              { offset: 1, color: "#87e8de" },
-            ],
-          },
-        },
+        yAxisIndex: 0,
+        data: tagPlaySorted.map((t) => t.video_count),
+        itemStyle: { color: "#00A1D6" },
+      },
+      {
+        name: "平均播放量",
+        type: "line",
+        yAxisIndex: 1,
+        data: tagPlaySorted.map((t) => t.avg_play_count),
+        smooth: true,
+        symbol: "circle",
+        symbolSize: 8,
+        lineStyle: { color: "#ff7875", width: 2 },
+        itemStyle: { color: "#ff7875" },
       },
     ],
   };
+
+  const contribNames = upContributions.map((u) => u.up_nickname);
+  const contribOption = {
+    tooltip: {
+      trigger: "axis" as const,
+      axisPointer: { type: "shadow" as const },
+    },
+    legend: { data: ["视频数", "音频数", "图文数", "充电数"] },
+    grid: { left: "3%", right: "4%", bottom: "3%", containLabel: true },
+    xAxis: {
+      type: "category" as const,
+      data: contribNames,
+      axisLabel: { rotate: 30, interval: 0 },
+    },
+    yAxis: { type: "value" as const, name: "数量" },
+    series: [
+      {
+        name: "视频数",
+        type: "bar",
+        stack: "贡献",
+        data: upContributions.map((u) => u.video_count),
+        itemStyle: { color: "#00A1D6" },
+      },
+      {
+        name: "音频数",
+        type: "bar",
+        stack: "贡献",
+        data: upContributions.map((u) => u.audio_count),
+        itemStyle: { color: "#52c41a" },
+      },
+      {
+        name: "图文数",
+        type: "bar",
+        stack: "贡献",
+        data: upContributions.map((u) => u.image_text_count),
+        itemStyle: { color: "#faad14" },
+      },
+      {
+        name: "充电数",
+        type: "bar",
+        stack: "贡献",
+        data: upContributions.map((u) => u.elec),
+        itemStyle: { color: "#ff7875" },
+      },
+    ],
+  };
+
+  const contribColumns = [
+    { title: "排名", render: (_: any, __: any, i: number) => i + 1, width: 60 },
+    { title: "UP主昵称", dataIndex: "up_nickname", width: 150 },
+    { title: "等级", dataIndex: "level", width: 60, render: (v: number) => `Lv${v}` },
+    { title: "视频数", dataIndex: "video_count", width: 80, sorter: (a: any, b: any) => a.video_count - b.video_count },
+    { title: "音频数", dataIndex: "audio_count", width: 80, sorter: (a: any, b: any) => a.audio_count - b.audio_count },
+    { title: "图文数", dataIndex: "image_text_count", width: 80, sorter: (a: any, b: any) => a.image_text_count - b.image_text_count },
+    { title: "充电数", dataIndex: "elec", width: 80, sorter: (a: any, b: any) => a.elec - b.elec },
+    {
+      title: "总贡献量",
+      dataIndex: "total_contribution",
+      width: 100,
+      sorter: (a: any, b: any) => a.total_contribution - b.total_contribution,
+      defaultSortOrder: "descend" as const,
+      render: (v: number) => <strong style={{ color: "#00A1D6" }}>{v}</strong>,
+    },
+    {
+      title: "粉丝数",
+      dataIndex: "follower_count",
+      render: (v: number) => (v >= 10000 ? (v / 10000).toFixed(1) + "万" : String(v)),
+    },
+  ];
 
   const upColumns = [
     { title: "排名", render: (_: any, __: any, i: number) => i + 1, width: 60 },
     { title: "UP主UID", dataIndex: "up_uid", width: 120 },
+    { title: "UP主昵称", dataIndex: "up_nickname", width: 150 },
     { title: "视频数", dataIndex: "video_count", width: 80 },
     {
       title: "平均播放量",
@@ -130,13 +245,27 @@ export default function AnalysisPage() {
       </Row>
       <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
         <Col xs={24} lg={12}>
-          <Card title="分区分布">
-            <ReactECharts option={partitionOption} style={{ height: 350 }} />
+          <Card title="视频标签分布">
+            <ReactECharts option={tagDistOption} style={{ height: 350 }} />
           </Card>
         </Col>
         <Col xs={24} lg={12}>
-          <Card title="热门标签 TOP20">
-            <ReactECharts option={tagOption} style={{ height: 350 }} />
+          <Card title="标签播放量分析 TOP20">
+            <ReactECharts option={tagPlayOption} style={{ height: 350 }} />
+          </Card>
+        </Col>
+      </Row>
+      <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
+        <Col xs={24} lg={24}>
+          <Card title="UP主贡献量分析 TOP20">
+            <ReactECharts option={contribOption} style={{ height: 400 }} />
+          </Card>
+        </Col>
+      </Row>
+      <Row style={{ marginTop: 16 }}>
+        <Col span={24}>
+          <Card title="UP主贡献明细 TOP20">
+            <Table columns={contribColumns} dataSource={upContributions} rowKey="up_uid" pagination={false} size="small" scroll={{ x: 900 }} />
           </Card>
         </Col>
       </Row>

@@ -1,38 +1,54 @@
 import asyncio
-import time
+import random
 from datetime import datetime
-from typing import Optional
+
 import httpx
 from sqlalchemy import select
 from app.config import settings
 from app.database import AsyncSessionLocal
 from app.models.video import Video
-from app.models.video_tag import VideoTag
 from app.models.up_user import UpUser
-from app.models.snapshot import VideoSnapshot, UpUserSnapshot
+from app.models.video_tag import VideoTag
 from app.models.crawl_log import CrawlLog, CrawlLogDetail
+from app.services.test_playwright import fetch_data
+from app.services.bilibili_client import (
+    _safe_call,
+    fetch_popular_list,
+    fetch_video_tags,
+)
 
 _crawl_running = False
+_crawl_stop_requested = False
 _crawl_status = {"running": False, "message": "空闲中", "progress": "0/0"}
-
-BILI_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-    "Referer": "https://www.bilibili.com/",
-}
 
 
 def get_crawl_status() -> dict:
     return _crawl_status
 
 
+def stop_crawl_task():
+    global _crawl_stop_requested
+    _crawl_stop_requested = True
+    _crawl_status["message"] = "正在停止..."
+
+
+async def _random_delay(min_sec: float = None, max_sec: float = None):
+    min_sec = min_sec if min_sec is not None else settings.CRAWL_DELAY_MIN
+    max_sec = max_sec if max_sec is not None else settings.CRAWL_DELAY_MAX
+    delay = random.uniform(min_sec, max_sec)
+    await asyncio.sleep(delay)
+
+
 async def start_crawl_task(task_type: str = "full_sync"):
-    global _crawl_running, _crawl_status
+    global _crawl_running, _crawl_status, _crawl_stop_requested
     if _crawl_running:
         _crawl_status["message"] = "已有爬虫任务在运行中"
         return
     _crawl_running = True
-    _crawl_status = {"running": True, "message": "正在采集...", "progress": "0/0"}
+    _crawl_stop_requested = False
+    _crawl_status = {"running": True, "message": "正在采集热门列表...", "progress": "0/0"}
 
+    log_id = None
     async with AsyncSessionLocal() as db:
         log = CrawlLog(
             task_type=task_type,
@@ -45,65 +61,66 @@ async def start_crawl_task(task_type: str = "full_sync"):
         log_id = log.id
 
         try:
-            async with httpx.AsyncClient(timeout=30.0, headers=BILI_HEADERS) as client:
-                popular_videos = await _fetch_popular_list(client, log_id)
-                total = len(popular_videos)
-                log.total_videos = total
-                _crawl_status["progress"] = f"0/{total}"
+            popular_videos = await _fetch_popular_list(log_id)
+            total = len(popular_videos)
+            log.total_videos = total
+            _crawl_status["progress"] = f"0/{total}"
 
-                success = 0
-                failed = 0
-                skipped = 0
+            success = 0
+            failed = 0
+            skipped = 0
 
-                for idx, item in enumerate(popular_videos):
-                    try:
-                        bvid = item.get("bvid", "")
-                        if not bvid:
-                            skipped += 1
-                            continue
+            for idx, item in enumerate(popular_videos):
+                try:
+                    bvid = item.get("bvid", "")
+                    title = item.get("title", "")
+                    owner = item.get("owner", {})
+                    stat = item.get("stat", {})
+                    print(f"[{idx + 1}/{total}] {bvid} | {title} | UP主: {owner.get('name', '?')} | 播放: {stat.get('view', 0)} | 弹幕: {stat.get('danmaku', 0)}")
 
-                        existing = await db.execute(
-                            select(Video).where(Video.bvid == bvid)
-                        )
-                        if existing.scalar_one_or_none():
-                            skipped += 1
-                            _crawl_status["progress"] = f"{idx + 1}/{total}"
-                            continue
+                    if _crawl_stop_requested:
+                        _crawl_status["message"] = "已手动停止"
+                        break
 
-                        await _process_video(client, item, db, log_id)
-                        await db.commit()
-                        success += 1
-                        _crawl_status["progress"] = f"{idx + 1}/{total}"
+                    if not bvid:
+                        skipped += 1
+                        continue
 
-                    except Exception as e:
-                        failed += 1
-                        detail = CrawlLogDetail(
-                            log_id=log_id,
-                            bvid=item.get("bvid", "unknown"),
-                            api_step=0,
-                            status="failed",
-                            error_msg=str(e)[:1000],
-                        )
-                        db.add(detail)
+                    await _process_video(item, db, log_id)
+                    await db.commit()
+                    success += 1
+                    _crawl_status["progress"] = f"{idx + 1}/{total}"
 
-                    await asyncio.sleep(settings.CRAWL_REQUEST_DELAY)
+                except Exception as e:
+                    failed += 1
+                    print(f"[爬虫] 处理视频失败 bvid={item.get('bvid')}: {e}")
+                    detail = CrawlLogDetail(
+                        log_id=log_id,
+                        bvid=item.get("bvid", "unknown"),
+                        api_step=0,
+                        status="failed",
+                        error_msg=str(e)[:1000],
+                    )
+                    db.add(detail)
 
-                log.status = "success" if failed == 0 else "partial"
-                log.success_count = success
-                log.failed_count = failed
-                log.skipped_count = skipped
-                log.finished_at = datetime.now()
-                if log.started_at:
-                    log.duration_ms = int((log.finished_at - log.started_at).total_seconds() * 1000)
-                await db.commit()
+            log.status = "success" if failed == 0 else "partial"
+            log.success_count = success
+            log.failed_count = failed
+            log.skipped_count = skipped
+            log.finished_at = datetime.now()
+            if log.started_at:
+                log.duration_ms = int((log.finished_at - log.started_at).total_seconds() * 1000)
+            await db.commit()
 
-                _crawl_status = {
-                    "running": False,
-                    "message": f"采集完成: 成功{success}, 失败{failed}, 跳过{skipped}",
-                    "progress": f"{total}/{total}",
-                }
+            _crawl_status = {
+                "running": False,
+                "message": f"采集完成: 成功{success}, 失败{failed}, 跳过{skipped}",
+                "progress": f"{success + failed + skipped}/{total}",
+            }
 
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             log.status = "failed"
             log.error_msg = str(e)[:5000]
             log.finished_at = datetime.now()
@@ -112,61 +129,59 @@ async def start_crawl_task(task_type: str = "full_sync"):
 
         finally:
             _crawl_running = False
+            _crawl_stop_requested = False
 
 
-async def _fetch_popular_list(client: httpx.AsyncClient, log_id: int) -> list:
+async def _fetch_popular_list(log_id: int) -> list:
     all_videos = []
     for pn in range(1, settings.CRAWL_POPULAR_PAGES + 1):
-        url = f"https://api.bilibili.com/x/web-interface/popular?pn={pn}&ps=50"
-        for retry in range(settings.CRAWL_MAX_RETRY):
-            try:
-                resp = await client.get(url)
-                data = resp.json()
-                if data.get("code") == 0:
-                    videos = data.get("data", {}).get("list", [])
-                    all_videos.extend(videos)
-                    break
-                else:
-                    if retry == settings.CRAWL_MAX_RETRY - 1:
-                        async with AsyncSessionLocal() as db:
-                            detail = CrawlLogDetail(
-                                log_id=log_id, bvid="", api_step=1,
-                                api_url=url, status="failed",
-                                http_status=resp.status_code,
-                                error_msg=f"API返回错误: {data.get('message', '')}"[:1000],
-                                retry_count=retry + 1,
-                            )
-                            db.add(detail)
-                            await db.flush()
-            except Exception as e:
-                if retry == settings.CRAWL_MAX_RETRY - 1:
-                    async with AsyncSessionLocal() as db:
-                        detail = CrawlLogDetail(
-                            log_id=log_id, bvid="", api_step=1,
-                            api_url=url, status="failed",
-                            error_msg=str(e)[:1000],
-                            retry_count=retry + 1,
-                        )
-                        db.add(detail)
-                        await db.flush()
-            await asyncio.sleep(1)
-        await asyncio.sleep(settings.CRAWL_REQUEST_DELAY)
+        if _crawl_stop_requested:
+            break
+
+        async def _call(client):
+            return await fetch_popular_list(client, pn=pn, ps=50)
+
+        result = await _safe_call(
+            _call,
+            log_id=log_id,
+            api_step=1,
+            api_url=f"热门列表 pn={pn}",
+        )
+        if result is not None:
+            videos = result.get("list", [])
+            all_videos.extend(videos)
     return all_videos
 
+# 测试爬虫
+async def test_crawler():
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        for pn in range(1, settings.CRAWL_POPULAR_PAGES + 1):
+            result = await fetch_popular_list(client, pn=pn, ps=50)
+            videos = result.get("data",{}).get("list",[]) if result else []
+            print(f"获取到 {len(videos)} 个视频")
+            async with AsyncSessionLocal() as db:
+                for video in videos:
+                    await _process_video(video, db, log_id=0)
+                    await _create_video_tags(client, db, video.get("bvid", ""))
+                await db.commit()
 
-async def _process_video(client: httpx.AsyncClient, item: dict, db, log_id: int):
+
+# step 1 处理视频列表数据
+async def _process_video(
+    item: dict,
+    db,
+    log_id: int = 0,
+):
     bvid = item.get("bvid", "")
     stat = item.get("stat", {})
     owner = item.get("owner", {})
     mid = owner.get("mid", 0)
 
-    # Step 1: 处理UP主信息
-    up_user = await _get_or_create_up_user(client, mid, db, log_id)
+    if mid == 0:
+        return
 
-    # Step 2: 获取视频标签
-    tags = await _fetch_video_tags(client, bvid, log_id)
+    up_user = await _create_default_up(mid, db, owner)
 
-    # Step 3: 计算衍生字段
     play = stat.get("view", 0)
     like = stat.get("like", 0)
     comment = stat.get("reply", 0)
@@ -174,7 +189,8 @@ async def _process_video(client: httpx.AsyncClient, item: dict, db, log_id: int)
     coin = stat.get("coin", 0)
     fav = stat.get("favorite", 0)
     share = stat.get("share", 0)
-
+    pub_location = item.get("pub_location", "")
+    partition_sub = item.get("tnamev2", "")
     total_interact = like + comment + danmaku + coin + fav + share
     interaction_rate = round(total_interact / play, 6) if play > 0 else 0
 
@@ -185,162 +201,121 @@ async def _process_video(client: httpx.AsyncClient, item: dict, db, log_id: int)
 
     pub_time = datetime.fromtimestamp(item.get("pubdate", 0))
 
-    video = Video(
-        bvid=bvid,
-        title=item.get("title", ""),
-        cover_url=item.get("pic", ""),
-        description=item.get("desc", ""),
-        play_count=play,
-        danmaku_count=danmaku,
-        comment_count=comment,
-        like_count=like,
-        coin_count=coin,
-        favorite_count=fav,
-        share_count=share,
-        duration=item.get("duration", 0),
-        pub_time=pub_time,
-        partition_main=item.get("tname", "未知"),
-        up_id=up_user.id,
-        up_uid=mid,
-        interaction_rate=interaction_rate,
-        heat_score=round(heat_score, 2),
-        crawl_time=datetime.now(),
-    )
-    db.add(video)
-    await db.flush()
+    existing_video = (await db.execute(select(Video).where(Video.bvid == bvid))).scalar_one_or_none()
 
-    # 写入标签
-    for tag_name in tags:
-        vt = VideoTag(bvid=bvid, tag_name=tag_name, crawl_time=datetime.now())
-        db.add(vt)
-
-    # 写入视频快照
-    snapshot = VideoSnapshot(
-        bvid=bvid,
-        video_id=video.id,
-        up_id=up_user.id,
-        play_count=play,
-        danmaku_count=danmaku,
-        comment_count=comment,
-        like_count=like,
-        coin_count=coin,
-        favorite_count=fav,
-        share_count=share,
-        interaction_rate=interaction_rate,
-        heat_score=round(heat_score, 2),
-        snapshot_date=datetime.now().date(),
-        crawl_time=datetime.now(),
-    )
-    db.add(snapshot)
-
-    # 写入UP主快照
-    up_snapshot = UpUserSnapshot(
-        up_id=up_user.id,
-        up_uid=mid,
-        follower_count=up_user.follower_count,
-        following_count=up_user.following_count,
-        total_likes=up_user.total_likes,
-        total_plays=up_user.total_plays,
-        video_count=up_user.video_count,
-        snapshot_date=datetime.now().date(),
-        crawl_time=datetime.now(),
-    )
-    db.add(up_snapshot)
+    if existing_video:
+        existing_video.title = item.get("title", "")
+        existing_video.cover_url = item.get("pic", "")
+        existing_video.description = item.get("desc", "")
+        existing_video.play_count = play
+        existing_video.danmaku_count = danmaku
+        existing_video.comment_count = comment
+        existing_video.like_count = like
+        existing_video.coin_count = coin
+        existing_video.favorite_count = fav
+        existing_video.share_count = share
+        existing_video.duration = item.get("duration", 0)
+        existing_video.pub_time = pub_time
+        existing_video.pub_location = pub_location
+        existing_video.partition_sub = partition_sub
+        existing_video.partition_main = item.get("tname", "未知")
+        existing_video.up_id = up_user.id
+        existing_video.up_uid = mid
+        existing_video.interaction_rate = interaction_rate
+        existing_video.heat_score = round(heat_score, 2)
+        existing_video.crawl_time = datetime.now()
+        video = existing_video
+        await db.flush()
+    else:
+        video = Video(
+            bvid=bvid,
+            title=item.get("title", ""),
+            cover_url=item.get("pic", ""),
+            description=item.get("desc", ""),
+            play_count=play,
+            danmaku_count=danmaku,
+            comment_count=comment,
+            like_count=like,
+            coin_count=coin,
+            favorite_count=fav,
+            share_count=share,
+            duration=item.get("duration", 0),
+            pub_time=pub_time,
+            pub_location=pub_location,
+            partition_sub=partition_sub,
+            partition_main=item.get("tname", "未知"),
+            up_id=up_user.id,
+            up_uid=mid,
+            interaction_rate=interaction_rate,
+            heat_score=round(heat_score, 2),
+            crawl_time=datetime.now(),
+        )
+        db.add(video)
+        await db.flush()
+        await db.refresh(video)
 
 
-async def _get_or_create_up_user(client: httpx.AsyncClient, mid: int, db, log_id: int) -> UpUser:
+# 创建UP主信息
+async def _create_default_up(mid, db, owner) -> UpUser:
     if mid == 0:
-        return await _create_default_up(db)
+        return None
+    existing = (await db.execute(
+        select(UpUser).where(UpUser.up_uid == mid)
+    )).scalar_one_or_none()
 
-    result = await db.execute(select(UpUser).where(UpUser.up_uid == mid))
-    existing = result.scalar_one_or_none()
+    page_data = await fetch_data(mid)
+    stats = page_data.get("data", {}) if page_data else {}
+
+    def _parse_int(val):
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            return 0
+
+    follower = _parse_int(stats.get("粉丝数"))
+    following = _parse_int(stats.get("关注数"))
+    total_likes = _parse_int(stats.get("获赞数"))
+    total_plays = _parse_int(stats.get("播放数"))
+    video_count = _parse_int(stats.get("视频"))
+    image_text_count = _parse_int(stats.get("图文"))
+    audio_count = _parse_int(stats.get("音频"))
+    elec= _parse_int(stats.get("elec"))
+    level= _parse_int(stats.get("level"))
+    total=video_count+image_text_count+audio_count
+    sign = stats.get("sign", "")
     if existing:
+        existing.nickname = owner.get('name', '') or existing.nickname
+        existing.avatar_url = owner.get('face', '') or existing.avatar_url
+        existing.follower_count = follower or existing.follower_count
+        existing.following_count = following or existing.following_count
+        existing.total_likes = total_likes or existing.total_likes
+        existing.total_plays = total_plays or existing.total_plays
+        existing.video_count = video_count or existing.video_count
+        existing.image_text_count = image_text_count or existing.image_text_count
+        existing.audio_count = audio_count or existing.audio_count
+        existing.level= level or existing.level
+        existing.elec = elec or existing.elec
+        existing.total = total or existing.total
+        existing.sign = sign or existing.sign
+        existing.crawl_time = datetime.now()
+        await db.flush()
         return existing
 
-    nickname = "未知"
-    sex = "保密"
-    level = 0
-    sign = ""
-    avatar = ""
-    follower = 0
-    following = 0
-    total_likes = 0
-    total_plays = 0
-    video_count = 0
-
-    # Step ③: UP主信息
-    try:
-        resp = await client.get(f"https://api.bilibili.com/x/space/acc/info?mid={mid}")
-        data = resp.json()
-        if data.get("code") == 0:
-            d = data.get("data", {})
-            nickname = d.get("name", "未知")
-            sex = d.get("sex", "保密")
-            level = d.get("level", 0)
-            sign = d.get("sign", "")
-            avatar = d.get("face", "")
-    except Exception:
-        pass
-
-    # Step ④: UP主统计 (粉丝/关注)
-    try:
-        resp = await client.get(f"https://api.bilibili.com/x/relation/stat?vmid={mid}")
-        data = resp.json()
-        if data.get("code") == 0:
-            d = data.get("data", {})
-            follower = d.get("follower", 0)
-            following = d.get("following", 0)
-    except Exception:
-        pass
-
-    # Step ⑤: UP主投稿统计
-    try:
-        resp = await client.get(f"https://api.bilibili.com/x/space/upstat?mid={mid}")
-        data = resp.json()
-        if data.get("code") == 0:
-            d = data.get("data", {})
-            total_likes = d.get("likes", 0)
-            total_plays = d.get("archive", {}).get("view", 0)
-    except Exception:
-        pass
-
-    # Step ⑥: UP主视频总数
-    try:
-        resp = await client.get(f"https://api.bilibili.com/x/space/arc/search?mid={mid}&pn=1&ps=50")
-        data = resp.json()
-        if data.get("code") == 0:
-            video_count = data.get("data", {}).get("page", {}).get("count", 0)
-    except Exception:
-        pass
-
-    up_user = UpUser(
+    up = UpUser(
         up_uid=mid,
-        nickname=nickname,
-        sex=sex,
-        level=level,
-        sign=sign,
-        avatar_url=avatar,
+        nickname=owner.get('name', ''),
+        avatar_url=owner.get('face', ''),
         follower_count=follower,
         following_count=following,
         total_likes=total_likes,
         total_plays=total_plays,
         video_count=video_count,
-        crawl_time=datetime.now(),
-    )
-    db.add(up_user)
-    await db.flush()
-    await db.refresh(up_user)
-    return up_user
-
-
-async def _create_default_up(db) -> UpUser:
-    result = await db.execute(select(UpUser).where(UpUser.up_uid == 0))
-    existing = result.scalar_one_or_none()
-    if existing:
-        return existing
-    up = UpUser(
-        up_uid=0,
-        nickname="未知UP主",
+        image_text_count=image_text_count,
+        audio_count=audio_count,
+        total=total,
+        elec=elec,
+        level=level,
+        sign=sign,
         crawl_time=datetime.now(),
     )
     db.add(up)
@@ -348,38 +323,27 @@ async def _create_default_up(db) -> UpUser:
     await db.refresh(up)
     return up
 
+# 创建视频标签并更新标签
+async def _create_video_tags(client: httpx.AsyncClient, db, bvid: str):
+    await asyncio.sleep(random.uniform(2, 5))
+    result = await fetch_video_tags(client, bvid)
+    if result is None:
+        return
+    tags = result.get("data", []) if result else []
 
-async def _fetch_video_tags(client: httpx.AsyncClient, bvid: str, log_id: int) -> list:
-    url = f"https://api.bilibili.com/x/web-interface/view/detail?bvid={bvid}"
-    for retry in range(settings.CRAWL_MAX_RETRY):
-        try:
-            resp = await client.get(url)
-            data = resp.json()
-            if data.get("code") == 0:
-                tags_data = data.get("data", {}).get("Tags", [])
-                return [t.get("tag_name", "") for t in tags_data if t.get("tag_name")]
-            else:
-                if retry == settings.CRAWL_MAX_RETRY - 1:
-                    async with AsyncSessionLocal() as db2:
-                        detail = CrawlLogDetail(
-                            log_id=log_id, bvid=bvid, api_step=2,
-                            api_url=url, status="failed",
-                            http_status=resp.status_code,
-                            error_msg=f"API错误: {data.get('message', '')}"[:1000],
-                            retry_count=retry + 1,
-                        )
-                        db2.add(detail)
-                        await db2.flush()
-        except Exception as e:
-            if retry == settings.CRAWL_MAX_RETRY - 1:
-                async with AsyncSessionLocal() as db2:
-                    detail = CrawlLogDetail(
-                        log_id=log_id, bvid=bvid, api_step=2,
-                        api_url=url, status="failed",
-                        error_msg=str(e)[:1000],
-                        retry_count=retry + 1,
-                    )
-                    db2.add(detail)
-                    await db2.flush()
-        await asyncio.sleep(1)
-    return []
+    old_tags = (await db.execute(
+        select(VideoTag).where(VideoTag.bvid == bvid)
+    )).scalars().all()
+    for t in old_tags:
+        await db.delete(t)
+    await db.flush()
+
+    for tag in tags:
+        video_tag = VideoTag(
+            bvid=bvid,
+            tag_id=tag.get("tag_id", 0),
+            tag_name=tag.get("tag_name", ""),
+            crawl_time=datetime.now(),
+        )
+        db.add(video_tag)
+    await db.flush()

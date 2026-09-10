@@ -7,6 +7,7 @@ class VideoTag(Base):
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     bvid = Column(String(20), nullable=False)
+    tag_id = Column(BigInteger, nullable=False, default=0)
     tag_name = Column(String(100), nullable=False)
     crawl_time = Column(DateTime, nullable=False)
     created_at = Column(DateTime, nullable=False, server_default=func.now())

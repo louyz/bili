@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Card, Table, Button, Modal, Input, Select, message, Space, Tag, Popconfirm } from "antd";
+import { Table, Button, Modal, Input, message, Space, Tag, Popconfirm } from "antd";
 import { PlusOutlined, DeleteOutlined, FolderOutlined } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
 import { favApi } from "../api";

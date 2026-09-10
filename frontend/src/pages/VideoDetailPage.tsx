@@ -14,7 +14,12 @@ export default function VideoDetailPage() {
 
   useEffect(() => {
     if (!bvid) return;
-    videoApi.getDetail(bvid).then((res) => setVideo(res.data)).finally(() => setLoading(false));
+    const controller = new AbortController();
+    setLoading(true);
+    videoApi.getDetail(bvid, { signal: controller.signal })
+      .then((res) => setVideo(res.data))
+      .finally(() => setLoading(false));
+    return () => controller.abort();
   }, [bvid]);
 
   const handleFavorite = async () => {
@@ -32,15 +37,39 @@ export default function VideoDetailPage() {
 
   const formatNum = (n: number) => (n >= 10000 ? (n / 10000).toFixed(1) + "万" : String(n));
 
+  const radarValues = [
+    video.play_count,
+    video.like_count,
+    video.comment_count,
+    video.danmaku_count,
+    video.coin_count,
+    video.favorite_count,
+  ];
+  const radarMax = Math.max(...radarValues, 1) * 1.2;
+
+  const radarLabels = ["播放", "点赞", "评论", "弹幕", "投币", "收藏"];
+
   const radarOption = {
+    tooltip: {
+      trigger: "item",
+      formatter: (params: any) => {
+        const values = params.value as number[];
+        const lines = radarLabels.map((label, i) => {
+          return `${label}: ${formatNum(values[i])}`;
+        });
+        return `${params.name}<br/>${lines.join("<br/>")}`;
+      },
+    },
     radar: {
+      shape: "polygon",
+      radius: "65%",
       indicator: [
-        { name: "播放", max: Math.max(video.play_count, 1) },
-        { name: "点赞", max: Math.max(video.like_count, 1) },
-        { name: "评论", max: Math.max(video.comment_count, 1) },
-        { name: "弹幕", max: Math.max(video.danmaku_count, 1) },
-        { name: "投币", max: Math.max(video.coin_count, 1) },
-        { name: "收藏", max: Math.max(video.favorite_count, 1) },
+        { name: "播放", max: radarMax },
+        { name: "点赞", max: radarMax },
+        { name: "评论", max: radarMax },
+        { name: "弹幕", max: radarMax },
+        { name: "投币", max: radarMax },
+        { name: "收藏", max: radarMax },
       ],
     },
     series: [
@@ -48,9 +77,18 @@ export default function VideoDetailPage() {
         type: "radar",
         data: [
           {
-            value: [video.play_count, video.like_count, video.comment_count, video.danmaku_count, video.coin_count, video.favorite_count],
+            value: radarValues,
             name: video.title,
             areaStyle: { color: "rgba(0,161,214,0.3)" },
+            lineStyle: { color: "#00a1d6", width: 2 },
+            itemStyle: { color: "#00a1d6" },
+            label: {
+              show: true,
+              formatter: (params: any) => {
+                const idx = params.dimensionIndex;
+                return formatNum(radarValues[idx]);
+              },
+            },
           },
         ],
       },
@@ -149,7 +187,7 @@ export default function VideoDetailPage() {
             </Card>
           )}
           <Card title="数据雷达图" style={{ marginTop: 16 }}>
-            <ReactECharts option={radarOption} style={{ height: 300 }} />
+            <ReactECharts option={radarOption} notMerge style={{ height: 300 }} />
           </Card>
         </Col>
       </Row>

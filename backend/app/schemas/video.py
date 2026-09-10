@@ -11,6 +11,8 @@ class UpUserInfo(BaseModel):
     level: int
     sign: Optional[str] = None
     avatar_url: Optional[str] = None
+    official_role: int = 0
+    official_title: Optional[str] = None
     follower_count: int
     following_count: int
     total_likes: int
