@@ -121,6 +121,14 @@ export interface PartitionStat {
   avg_heat_score: number;
 }
 
+export interface PartitionHierarchyNode {
+  name: string;
+  value: number;
+  avg_heat_score: number;
+  avg_interaction_rate: number;
+  children?: PartitionHierarchyNode[];
+}
+
 export interface TrendPoint {
   date: string;
   avg_play_count: number;
@@ -138,6 +146,34 @@ export interface UpContribution {
   elec: number;
   follower_count: number;
   total_contribution: number;
+}
+
+export interface InteractionItem {
+  name: string;
+  value: number;
+}
+
+export interface PartitionImpactItem {
+  partition: string;
+  video_count: number;
+  avg_play_count: number;
+  avg_interaction_rate: number;
+  avg_heat_score: number;
+}
+
+export interface DurationImpactItem {
+  duration_bucket: string;
+  video_count: number;
+  avg_play_count: number;
+  avg_interaction_rate: number;
+}
+
+export interface PubTimeHeatItem {
+  weekday: string;
+  weekday_idx: number;
+  hour: number;
+  video_count: number;
+  avg_play_count: number;
 }
 
 export interface UserInfo {
@@ -195,6 +231,8 @@ export const analysisApi = {
   getTrends: (days: number = 7) =>
     api.get<TrendPoint[]>("/analysis/trends", { params: { days } }),
   getPartitions: () => api.get<PartitionStat[]>("/analysis/partitions"),
+  getPartitionsHierarchy: () =>
+    api.get<PartitionHierarchyNode[]>("/analysis/partitions-hierarchy"),
   getTags: (limit: number = 50) =>
     api.get<TagFrequency[]>("/analysis/tags", { params: { limit } }),
   getUpRank: (limit: number = 20) =>
@@ -204,6 +242,12 @@ export const analysisApi = {
     ),
   getUpContribution: (limit: number = 20) =>
     api.get<UpContribution[]>("/analysis/up-contribution", { params: { limit } }),
+  getInteractionStructure: () =>
+    api.get<InteractionItem[]>("/analysis/interaction-structure"),
+  getPartitionImpact: (limit: number = 15) =>
+    api.get<PartitionImpactItem[]>("/analysis/partition-impact", { params: { limit } }),
+  getDurationImpact: () => api.get<DurationImpactItem[]>("/analysis/duration-impact"),
+  getPubTimeHeatmap: () => api.get<PubTimeHeatItem[]>("/analysis/pub-time-heatmap"),
 };
 
 // Favorites

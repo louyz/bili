@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select, func, desc, text
+from sqlalchemy import select, func, desc, text, case
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime, timedelta
 from app.database import get_db
@@ -91,6 +91,58 @@ async def get_partition_stats(db: AsyncSession = Depends(get_db)):
     ]
 
 
+@router.get("/partitions-hierarchy")
+async def get_partition_hierarchy(db: AsyncSession = Depends(get_db)):
+    main_result = await db.execute(
+        select(
+            Video.partition_main,
+            func.count(Video.id).label("cnt"),
+            func.avg(Video.heat_score).label("avg_heat"),
+            func.avg(Video.interaction_rate).label("avg_rate"),
+        )
+        .where(Video.is_active == True)
+        .group_by(Video.partition_main)
+    )
+    main_rows = main_result.all()
+
+    sub_result = await db.execute(
+        select(
+            Video.partition_main,
+            Video.partition_sub,
+            func.count(Video.id).label("cnt"),
+            func.avg(Video.heat_score).label("avg_heat"),
+            func.avg(Video.interaction_rate).label("avg_rate"),
+        )
+        .where(Video.is_active == True)
+        .group_by(Video.partition_main, Video.partition_sub)
+    )
+    sub_rows = sub_result.all()
+
+    sub_map = {}
+    for row in sub_rows:
+        main = row[0]
+        sub_name = row[1] or "未分类"
+        sub_map.setdefault(main, []).append({
+            "name": sub_name,
+            "value": row[2],
+            "avg_heat_score": round(float(row[3] or 0), 2),
+            "avg_interaction_rate": round(float(row[4] or 0), 4),
+        })
+
+    data = []
+    for row in main_rows:
+        main = row[0]
+        children = sub_map.get(main, [])
+        data.append({
+            "name": main,
+            "value": row[1],
+            "avg_heat_score": round(float(row[2] or 0), 2),
+            "avg_interaction_rate": round(float(row[3] or 0), 4),
+            "children": children,
+        })
+    return data
+
+
 @router.get("/tags", response_model=list[TagFrequencyItem])
 async def get_tag_frequency(
     limit: int = Query(50, ge=1, le=200),
@@ -166,7 +218,7 @@ async def get_up_rank(
 
 @router.get("/up-contribution")
 async def get_up_contribution(
-    limit: int = Query(20, ge=1, le=100),
+    limit: int = Query(40, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
 ):
     contribution = (
@@ -207,3 +259,118 @@ async def get_up_contribution(
         }
         for row in rows
     ]
+
+
+@router.get("/interaction-structure")
+async def get_interaction_structure(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(
+            func.sum(Video.danmaku_count).label("danmaku"),
+            func.sum(Video.comment_count).label("comment"),
+            func.sum(Video.like_count).label("like"),
+            func.sum(Video.coin_count).label("coin"),
+            func.sum(Video.favorite_count).label("favorite"),
+            func.sum(Video.share_count).label("share"),
+        ).where(Video.is_active == True)
+    )
+    row = result.one()
+    return [
+        {"name": "弹幕", "value": row[0] or 0},
+        {"name": "评论", "value": row[1] or 0},
+        {"name": "点赞", "value": row[2] or 0},
+        {"name": "投币", "value": row[3] or 0},
+        {"name": "收藏", "value": row[4] or 0},
+        {"name": "分享", "value": row[5] or 0},
+    ]
+
+
+@router.get("/partition-impact")
+async def get_partition_impact(
+    limit: int = Query(15, ge=1, le=50),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(
+            Video.partition_main,
+            func.count(Video.id).label("cnt"),
+            func.avg(Video.play_count).label("avg_play"),
+            func.avg(Video.interaction_rate).label("avg_rate"),
+            func.avg(Video.heat_score).label("avg_heat"),
+        )
+        .where(Video.is_active == True)
+        .group_by(Video.partition_main)
+        .order_by(desc(text("avg_play")))
+        .limit(limit)
+    )
+    rows = result.all()
+    return [
+        {
+            "partition": row[0],
+            "video_count": row[1],
+            "avg_play_count": round(float(row[2] or 0), 0),
+            "avg_interaction_rate": round(float(row[3] or 0), 4),
+            "avg_heat_score": round(float(row[4] or 0), 2),
+        }
+        for row in rows
+    ]
+
+
+@router.get("/duration-impact")
+async def get_duration_impact(db: AsyncSession = Depends(get_db)):
+    bucket = case(
+        (Video.duration < 180, "短视频(<3min)"),
+        (Video.duration < 600, "中视频(3-10min)"),
+        (Video.duration < 1800, "长视频(10-30min)"),
+        else_="超长(>30min)",
+    ).label("bucket")
+    result = await db.execute(
+        select(
+            bucket,
+            func.count(Video.id).label("cnt"),
+            func.avg(Video.play_count).label("avg_play"),
+            func.avg(Video.interaction_rate).label("avg_rate"),
+        )
+        .where(Video.is_active == True)
+        .group_by(bucket)
+    )
+    rows = result.all()
+    order = {"短视频(<3min)": 0, "中视频(3-10min)": 1, "长视频(10-30min)": 2, "超长(>30min)": 3}
+    rows = sorted(rows, key=lambda r: order.get(r[0], 99))
+    return [
+        {
+            "duration_bucket": row[0],
+            "video_count": row[1],
+            "avg_play_count": round(float(row[2] or 0), 0),
+            "avg_interaction_rate": round(float(row[3] or 0), 4),
+        }
+        for row in rows
+    ]
+
+
+@router.get("/pub-time-heatmap")
+async def get_pub_time_heatmap(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(
+            func.dayofweek(Video.pub_time).label("dow"),
+            func.hour(Video.pub_time).label("hour"),
+            func.count(Video.id).label("cnt"),
+            func.avg(Video.play_count).label("avg_play"),
+        )
+        .where(Video.is_active == True)
+        .group_by(func.dayofweek(Video.pub_time), func.hour(Video.pub_time))
+    )
+    rows = result.all()
+    week_names = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+    data = []
+    for row in rows:
+        dow = int(row[0])
+        hour = int(row[1])
+        idx = (dow + 5) % 7
+        data.append({
+            "weekday": week_names[idx],
+            "weekday_idx": idx,
+            "hour": hour,
+            "video_count": row[2],
+            "avg_play_count": round(float(row[3] or 0), 0),
+        })
+    return data
